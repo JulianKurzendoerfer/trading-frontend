@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchIndicators } from "../lib/api";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer,
   ComposedChart, Bar, Legend
