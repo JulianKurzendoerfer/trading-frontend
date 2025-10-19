@@ -21,7 +21,7 @@ export default function TradingDashboard() {
   async function load() {
     setLoading(true); setErr("");
     try {
-      const data = await fetchIndicators({ ticker, period, interval });
+const data = await fetchStock(ticker, period, interval);
       setRaw(data);
     } catch (e) {
       setErr(String(e));
