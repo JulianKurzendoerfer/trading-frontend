@@ -1,10 +1,30 @@
-import { API_BASE } from '../config';
+// src/lib/api.js
+import { API_BASE } from '../config.js';
 
-export async function fetchStock(ticker, period, interval) {
-  const url = `${API_BASE}/api/stock?ticker=${encodeURIComponent(ticker)}&period=${encodeURIComponent(period)}&interval=${encodeURIComponent(interval)}`;
-  const r = await fetch(url);
-  if (!r.ok) {
-    throw new Error(`API error ${r.status}`);
+/**
+ * Flexibler Fetch:
+ * - fetchStock({ ticker, period, interval })
+ * - fetchStock(ticker, period, interval)
+ */
+export async function fetchStock(a, b, c) {
+  let ticker, period, interval;
+
+  if (typeof a === 'object' && a) {
+    ({ ticker, period, interval } = a);
+  } else {
+    ticker = a;
+    period = b;
+    interval = c;
   }
-  return await r.json();
+
+  const url = `${API_BASE}/api/stock` +
+    `?ticker=${encodeURIComponent(ticker)}` +
+    `&period=${encodeURIComponent(period)}` +
+    `&interval=${encodeURIComponent(interval)}`;
+
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`API request failed: ${res.status}`);
+  }
+  return await res.json();
 }

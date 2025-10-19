@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { fetchStock } from '../lib/api';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer,
   ComposedChart, Bar, Legend
