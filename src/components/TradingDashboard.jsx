@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchStock } from '../lib/api';
+import { fetchStock } from '../lib/api.js';
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer,
   ComposedChart, Bar, Legend
@@ -18,18 +18,20 @@ export default function TradingDashboard() {
   const [err, setErr] = useState("");
   const [raw, setRaw] = useState(null);           // API-Response
 
-  async function load() {
-    setLoading(true); setErr("");
-    try {
-const data = await fetchStock(ticker, period, interval);
-      setRaw(data);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setLoading(false);
-    }
+async function load() {
+  setLoading(true);
+  setErr(null);
+  try {
+    const out = await fetchStock(ticker, period, interval);
+    // out = { data: [...], used_period: '...', used_interval: '...' , ...}
+    setRows(out.data); // oder setData(...) – je nachdem wie dein State heißt
+    setMeta({ used_period: out.used_period, used_interval: out.used_interval });
+  } catch (e) {
+    setErr(e?.message ?? String(e));
+  } finally {
+    setLoading(false);
   }
-
+}
   useEffect(() => { load(); /* auto initial */ }, []);
 
   // api response -> recharts friendly rows

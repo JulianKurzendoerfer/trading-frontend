@@ -1,30 +1,26 @@
-// src/lib/api.js
 import { API_BASE } from '../config.js';
 
-/**
- * Flexibler Fetch:
- * - fetchStock({ ticker, period, interval })
- * - fetchStock(ticker, period, interval)
- */
-export async function fetchStock(a, b, c) {
-  let ticker, period, interval;
+export async function fetchStock(ticker, period, interval) {
+  const qs = new URLSearchParams({ ticker });
+  if (period) qs.set('period', period);
+  if (interval) qs.set('interval', interval);
 
-  if (typeof a === 'object' && a) {
-    ({ ticker, period, interval } = a);
-  } else {
-    ticker = a;
-    period = b;
-    interval = c;
+  const url = `${API_BASE}/api/stock?${qs.toString()}`;
+  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    body = null;
   }
 
-  const url = `${API_BASE}/api/stock` +
-    `?ticker=${encodeURIComponent(ticker)}` +
-    `&period=${encodeURIComponent(period)}` +
-    `&interval=${encodeURIComponent(interval)}`;
-
-  const res = await fetch(url);
   if (!res.ok) {
-    throw new Error(`API request failed: ${res.status}`);
+    const msg = (body && body.error) ? body.error : `API ${res.status}`;
+    throw new Error(msg);
   }
-  return await res.json();
+  if (!body || !body.data) {
+    throw new Error('Leere Antwort vom Backend');
+  }
+  return body; // enthält u.a. used_period / used_interval
 }
