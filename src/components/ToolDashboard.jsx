@@ -2,230 +2,316 @@ import React, { useMemo, useState } from 'react';
 import Plot from 'react-plotly.js';
 import { API_BASE } from '../config.js';
 
-function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+const asNum = v => (v == null || v === '' ? null : Number(v));
+const pickArr = (o, ...keys) => keys.map(k => o?.[k]).find(v => Array.isArray(v));
+const toDates = xs => (xs || []).map(x => new Date(x));
 
-async function getJSONWithRetry(path){
-  const url = `${API_BASE}${path}`;
-  const tries = [0, 400, 900];
-  let lastErr = null;
-  for (let i=0; i<tries.length; i++){
-    try{
-      const res = await fetch(url, { cache:'no-store' });
-      if (res.ok){
-        return await res.json();
-      } else if ([502,503,504].includes(res.status)){
-        lastErr = new Error(`HTTP ${res.status}`);
-      } else {
-        const t = await res.text();
-        throw new Error(`HTTP ${res.status}: ${t}`);
+async function fetchStock(ticker, period, interval) {
+  const qs = new URLSearchParams({ ticker, period, interval }).toString();
+  const url = `${API_BASE}/api/stock?${qs}`;
+  for (let tryNo = 0; tryNo < 2; tryNo++) {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { 'Accept': 'application/json' },
+      cache: 'no-store',
+      mode: 'cors',
+    });
+    const txt = await res.text();
+    try {
+      const json = JSON.parse(txt);
+      if (json && (json.index || json.dates || json.Close || json.close)) {
+        return { ok: true, data: json };
       }
-    }catch(e){
-      lastErr = e;
-    }
-    if (i < tries.length-1) await sleep(tries[i+1]);
+    } catch (_) {}
+    await new Promise(r => setTimeout(r, 600));
   }
-  throw lastErr || new Error('Backend not reachable');
+  return { ok: false, error: 'no-data' };
 }
 
-function ema(arr, span){
-  const a = 2/(span+1);
+// ---- Indikatoren (pure JS) ----
+function ema(arr, span) {
+  const a = 2 / (span + 1);
   const out = new Array(arr.length).fill(null);
   let prev = null;
-  for (let i=0;i<arr.length;i++){
+  for (let i = 0; i < arr.length; i++) {
     const v = arr[i];
-    if (v==null){ out[i]=prev; continue; }
-    prev = (prev==null)? v : (a*v + (1-a)*prev);
-    out[i]=prev;
+    if (v == null) { out[i] = prev; continue; }
+    prev = (prev == null) ? v : a * v + (1 - a) * prev;
+    out[i] = prev;
   }
   return out;
 }
-
-function sma(arr, win){
+function sma(arr, win) {
   const out = new Array(arr.length).fill(null);
-  let s=0, q=[];
-  for (let i=0;i<arr.length;i++){
-    const v=arr[i];
-    q.push(v); s+=v;
-    if (q.length>win){ s-=q.shift(); }
-    if (q.length===win) out[i]=s/win;
+  let s = 0, q = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    q.push(v); s += (v ?? 0);
+    if (q.length > win) { s -= (q.shift() ?? 0); }
+    out[i] = (q.length === win ? s / win : null);
   }
   return out;
 }
-
-function std(arr, win, mean){
+function rollingStd(arr, win) {
   const out = new Array(arr.length).fill(null);
-  let q=[];
-  for (let i=0;i<arr.length;i++){
-    const v=arr[i];
+  let q = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
     q.push(v);
-    if (q.length>win){ q.shift(); }
-    if (q.length===win){
-      const m = mean[i];
-      let ss=0; for (let j=0;j<q.length;j++){ const d=q[j]-m; ss+=d*d; }
-      out[i]=Math.sqrt(ss/q.length);
-    }
+    if (q.length > win) q.shift();
+    if (q.length === win && q.every(x => x != null)) {
+      const m = q.reduce((a,b)=>a+b,0)/win;
+      const s2 = q.reduce((a,b)=>a+(b-m)*(b-m),0)/win;
+      out[i] = Math.sqrt(s2);
+    } else out[i] = null;
   }
   return out;
 }
-
-function rsiWilder(close, period=14){
+function macd(close, f=12, s=26, sig=9) {
+  const emaF = ema(close, f);
+  const emaS = ema(close, s);
+  const line = close.map((_,i)=> (emaF[i]==null||emaS[i]==null)?null:(emaF[i]-emaS[i]));
+  const signal = ema(line.map(v => v==null?0:v), sig).map((v,i)=> line[i]==null?null:v);
+  const hist = line.map((v,i)=> (v==null||signal[i]==null)?null:(v-signal[i]));
+  return { line, signal, hist };
+}
+function rsi(close, p=14) {
   const out = new Array(close.length).fill(null);
-  let prev = null, avgGain=0, avgLoss=0, initG=0, initL=0, initN=0;
+  let avgU = null, avgD = null;
   for (let i=1;i<close.length;i++){
-    const ch = close[i]-close[i-1];
-    const g = Math.max(0,ch), l = Math.max(0,-ch);
-    if (initN<period){ initG+=g; initL+=l; initN++; if (initN===period){ avgGain=initG/period; avgLoss=initL/period; } }
-    else { avgGain = (avgGain*(period-1)+g)/period; avgLoss=(avgLoss*(period-1)+l)/period; }
-    if (i>=period){
-      const rs = avgLoss===0? 100 : avgGain/avgLoss;
-      out[i] = 100 - (100/(1+rs));
+    const ch = (close[i]==null||close[i-1]==null)?null:(close[i]-close[i-1]);
+    const u = ch>0 ? ch : 0;
+    const d = ch<0 ? -ch : 0;
+    if (i===p){ avgU = u; avgD = d; }
+    if (i>p){
+      avgU = (avgU*(p-1)+u)/p;
+      avgD = (avgD*(p-1)+d)/p;
+      const rs = avgD===0? 100 : (avgU/avgD);
+      out[i] = 100 - 100/(1+rs);
     }
-    prev = close[i];
   }
   return out;
 }
+function highest(arr, n,i){ let m=-Infinity; for(let k=i-n+1;k<=i;k++){m=Math.max(m,arr[k]??-Infinity);} return m; }
+function lowest(arr, n,i){ let m=Infinity;  for(let k=i-n+1;k<=i;k++){m=Math.min(m,arr[k]?? Infinity);} return m; }
+function stochastic(h,l,c, kP=14, kS=3, dP=3){
+  const kRaw = new Array(c.length).fill(null);
+  for (let i=0;i<c.length;i++){
+    if (i<kP-1 || h[i]==null||l[i]==null||c[i]==null){ kRaw[i]=null; continue; }
+    const hh = highest(h, kP, i);
+    const ll = lowest(l, kP, i);
+    const denom = (hh-ll);
+    kRaw[i] = denom===0? 50 : 100*( (c[i]-ll)/denom );
+  }
+  const k = sma(kRaw, kS);
+  const d = sma(k, dP);
+  return { k, d };
+}
+function stochRSI(close, p=14, k=3, d=3){
+  const r = rsi(close, p);
+  const sr = new Array(close.length).fill(null);
+  for (let i=0;i<close.length;i++){
+    if (i<p*2){ sr[i]=null; continue; }
+    const seg = r.slice(i-p+1, i+1).filter(v=>v!=null);
+    if (seg.length<p){ sr[i]=null; continue; }
+    const lo = Math.min(...seg), hi = Math.max(...seg);
+    sr[i] = (hi-lo)===0 ? 50 : 100*((r[i]-lo)/(hi-lo));
+  }
+  const kk = sma(sr, k);
+  const dd = sma(kk, d);
+  return { k: kk, d: dd };
+}
+function bollinger(close, win=20, mult=2){
+  const m = sma(close, win);
+  const s = rollingStd(close, win);
+  const up = m.map((v,i)=> (v==null||s[i]==null)?null:(v+mult*s[i]));
+  const lo = m.map((v,i)=> (v==null||s[i]==null)?null:(v-mult*s[i]));
+  return { mid: m, up, lo };
+}
 
-function stoch(high, low, close, kPeriod=14, kSmooth=3, dPeriod=3){
-  const n=close.length;
-  const hh=new Array(n).fill(null), ll=new Array(n).fill(null), raw=new Array(n).fill(null);
-  let qH=[], qL=[];
-  for (let i=0;i<n;i++){
-    const H=high[i], L=low[i], C=close[i];
-    qH.push(H); qL.push(L);
-    if (qH.length>kPeriod){ qH.shift(); qL.shift(); }
-    if (qH.length===kPeriod){
-      const hi=Math.max(...qH), lo=Math.min(...qL);
-      raw[i] = (hi===lo)? 50 : ( (C-lo)/(hi-lo)*100 );
+// Trend-Levels (grob: lokale Extrema + Clustering)
+function localExtremaIdx(arr, win=10){
+  const lows=[], highs=[];
+  for (let i=win;i<arr.length-win;i++){
+    let lo=true, hi=true;
+    for (let j=i-win;j<=i+win;j++){
+      if (arr[j]==null){ lo=false; hi=false; break; }
+      if (arr[j] < arr[i]) hi=false;
+      if (arr[j] > arr[i]) lo=false;
+      if (!lo && !hi) break;
     }
+    if (lo) lows.push(i);
+    if (hi) highs.push(i);
   }
-  const ks = sma(raw,kSmooth);
-  const ds = sma(ks,dPeriod);
-  return { k: ks, d: ds };
+  return { lows, highs };
 }
-
-function macd(close, fast=12, slow=26, signal=9){
-  const emaF=ema(close,fast), emaS=ema(close,slow);
-  const m = close.map((_,i)=> emaF[i]!=null&&emaS[i]!=null? emaF[i]-emaS[i] : null);
-  const s = ema(m, signal);
-  const h = m.map((v,i)=> (v!=null&&s[i]!=null)? v-s[i] : null);
-  return { m, s, h };
-}
-
-function toCandles(rows){
-  const x=[], o=[], h=[], l=[], c=[];
-  for (const r of rows){
-    x.push(r.index); o.push(r.open); h.push(r.high); l.push(r.low); c.push(r.close);
+function clusterLevels(prices, idxs, tolRel=0.01){
+  const vals = idxs.map(i => prices[i]).filter(v=>v!=null).sort((a,b)=>a-b);
+  const clusters=[];
+  for (const v of vals){
+    const last = clusters[clusters.length-1];
+    if (!last || Math.abs(v - last[last.length-1]) > tolRel*last[last.length-1]) clusters.push([v]);
+    else last.push(v);
   }
-  return { x, o, h, l, c };
+  return clusters.map(c=>{
+    const m = c.reduce((a,b)=>a+b,0)/c.length;
+    return { y0: Math.min(...c), y1: Math.max(...c), center: m, count: c.length };
+  });
 }
 
+// -------------- React UI --------------
 export default function ToolDashboard(){
-  const [ticker, setTicker] = useState('AAPL');
-  const [period, setPeriod] = useState('1y');
+  const [ticker, setTicker]   = useState('AAPL');
+  const [period, setPeriod]   = useState('1y');
   const [interval, setInterval] = useState('1d');
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState('');
+  const [err, setErr]         = useState('');
   const [payload, setPayload] = useState(null);
 
   async function load(){
-    setErr(''); setLoading(true); setPayload(null);
-    try{
-      const path = `/api/stock?ticker=${encodeURIComponent(ticker)}&period=${encodeURIComponent(period)}&interval=${encodeURIComponent(interval)}`;
-      const p = await getJSONWithRetry(path);
-      if (!p || p.ok===false || !p.data || !p.data.length){
-        throw new Error(p && p.error ? p.error : 'Keine Daten');
-      }
-      setPayload(p);
-    }catch(e){
-      setErr(e.message || String(e));
-    }finally{
-      setLoading(false);
-    }
+    setLoading(true); setErr('');
+    const t = ticker.trim().toUpperCase();
+    const res = await fetchStock(t, period, interval);
+    setLoading(false);
+    if (!res.ok){ setErr('Keine Daten'); setPayload(null); return; }
+    setPayload(res.data || null);
+    if (!res.data) setErr('Keine Daten');
   }
 
-  const fig = useMemo(()=>{
-    if (!payload || !payload.data || !payload.data.length) return null;
-    const rows = payload.data;
-    const candles = toCandles(rows);
-    const close = candles.c.map(v=> (v==null? null: +v));
-    const high  = candles.h.map(v=> (v==null? null: +v));
-    const low   = candles.l.map(v=> (v==null? null: +v));
-
-    const ema9  = ema(close,9);
-    const ema21 = ema(close,21);
-    const ema50 = ema(close,50);
-
-    const bbMid = sma(close,20);
-    const bbStd = std(close,20,bbMid);
-    const bbUp  = bbMid.map((v,i)=> (v!=null&&bbStd[i]!=null)? v+2*bbStd[i]:null);
-    const bbLo  = bbMid.map((v,i)=> (v!=null&&bbStd[i]!=null)? v-2*bbStd[i]:null);
-
-    const mac = macd(close,12,26,9);
-    const rsi = rsiWilder(close,14);
-    const st  = stoch(high,low,close,14,3,3);
-    const stR = stoch(rsi,rsi,rsi,14,3,3);
-
-    const traces = [
-      {type:'candlestick', x:candles.x, open:candles.o, high:candles.h, low:candles.l, close:candles.c, name:'OHLC'},
-      {type:'scatter', mode:'lines', x:candles.x, y:bbUp, name:'BB Upper', line:{width:1}},
-      {type:'scatter', mode:'lines', x:candles.x, y:bbMid, name:'BB Basis', line:{width:1, dash:'dot'}},
-      {type:'scatter', mode:'lines', x:candles.x, y:bbLo, name:'BB Lower', line:{width:1}},
-      {type:'scatter', mode:'lines', x:candles.x, y:ema9,  name:'EMA 9', line:{width:1}},
-      {type:'scatter', mode:'lines', x:candles.x, y:ema21, name:'EMA 21', line:{width:1}},
-      {type:'scatter', mode:'lines', x:candles.x, y:ema50, name:'EMA 50', line:{width:1}},
-      {type:'bar',     x:candles.x, y:mac.h, name:'MACD Hist', xaxis:'x2', yaxis:'y2', opacity:0.5},
-      {type:'scatter', mode:'lines', x:candles.x, y:mac.m, name:'MACD',     xaxis:'x2', yaxis:'y2'},
-      {type:'scatter', mode:'lines', x:candles.x, y:mac.s, name:'Signal',   xaxis:'x2', yaxis:'y2'},
-      {type:'scatter', mode:'lines', x:candles.x, y:rsi,   name:'RSI(14)',  xaxis:'x3', yaxis:'y3'},
-      {type:'scatter', mode:'lines', x:candles.x, y:st.k,  name:'Stoch %K', xaxis:'x4', yaxis:'y4'},
-      {type:'scatter', mode:'lines', x:candles.x, y:st.d,  name:'Stoch %D', xaxis:'x4', yaxis:'y4'},
-      {type:'scatter', mode:'lines', x:candles.x, y:stR.k, name:'StochRSI %K', xaxis:'x5', yaxis:'y5'},
-      {type:'scatter', mode:'lines', x:candles.x, y:stR.d, name:'StochRSI %D', xaxis:'x5', yaxis:'y5'}
-    ];
-
-    const layout = {
-      template:'plotly_dark',
-      height:900,
-      margin:{l:40,r:10,t:30,b:20},
-      showlegend:false,
-      grid:{rows:5, columns:1, pattern:'independent', roworder:'top to bottom'},
-      xaxis:  {domain:[0,1]},
-      yaxis:  {domain:[0.60,1], fixedrange:false},
-      xaxis2: {anchor:'y2'},
-      yaxis2: {domain:[0.45,0.59]},
-      xaxis3: {anchor:'y3'},
-      yaxis3: {domain:[0.30,0.44], range:[0,100]},
-      xaxis4: {anchor:'y4'},
-      yaxis4: {domain:[0.15,0.29], range:[0,100]},
-      xaxis5: {anchor:'y5'},
-      yaxis5: {domain:[0.00,0.14], range:[0,100]}
+  // Daten normalisieren
+  const data = useMemo(()=> {
+    if (!payload) return null;
+    const xRaw = pickArr(payload,'index','dates','time','timestamp') || [];
+    const x = toDates(xRaw);
+    const open  = (pickArr(payload,'open','Open') || []).map(asNum);
+    const high  = (pickArr(payload,'high','High') || []).map(asNum);
+    const low   = (pickArr(payload,'low','Low')   || []).map(asNum);
+    const close = (pickArr(payload,'close','Close')|| []).map(asNum);
+    const vol   = (pickArr(payload,'volume','Volume')|| []).map(asNum);
+    const n = Math.min(x.length, open.length, high.length, low.length, close.length);
+    if (n < 20) return null;
+    return {
+      x: x.slice(-n), open: open.slice(-n), high: high.slice(-n),
+      low: low.slice(-n), close: close.slice(-n), volume: vol.slice(-n),
+      meta: payload.meta || {}
     };
-    return { layout, data: traces };
   }, [payload]);
 
+  const figs = useMemo(()=> {
+    if (!data) return null;
+    const { x, open, high, low, close } = data;
+
+    const bb = bollinger(close, 20, 2);
+    const ema9  = ema(close, 9);
+    const ema21 = ema(close, 21);
+    const ema50 = ema(close, 50);
+
+    const m = macd(close);
+    const r = rsi(close, 14);
+    const st = stochastic(high, low, close, 14, 3, 3);
+    const sr = stochRSI(close, 14, 3, 3);
+
+    const ext = localExtremaIdx(close, 10);
+    const clusters = clusterLevels(close, [...ext.lows, ...ext.highs], 0.01);
+
+    return {
+      price: {
+        data: [
+          { type:'candlestick', x, open, high, low, close, name:'OHLC',
+            increasing:{line:{width:1}}, decreasing:{line:{width:1}} },
+          { type:'scatter', mode:'lines', x, y: bb.up,   name:'BB upper', line:{width:1, dash:'dot'} },
+          { type:'scatter', mode:'lines', x, y: bb.mid,  name:'BB mid',   line:{width:1, dash:'dot'} },
+          { type:'scatter', mode:'lines', x, y: bb.lo,   name:'BB lower', line:{width:1, dash:'dot'} },
+          { type:'scatter', mode:'lines', x, y: ema9,  name:'EMA 9',  line:{width:1}},
+          { type:'scatter', mode:'lines', x, y: ema21, name:'EMA 21', line:{width:1}},
+          { type:'scatter', mode:'lines', x, y: ema50, name:'EMA 50', line:{width:1}},
+        ],
+        layout: { height: 420, margin:{l:40,r:10,t:10,b:20}, showlegend:false, xaxis:{rangeslider:{visible:false}} }
+      },
+      macd: {
+        data: [
+          { type:'bar', x, y: m.hist, name:'Hist', opacity:0.5 },
+          { type:'scatter', mode:'lines', x, y: m.line, name:'MACD' },
+          { type:'scatter', mode:'lines', x, y: m.signal, name:'Signal' },
+        ],
+        layout: { height: 180, margin:{l:40,r:10,t:10,b:20}, showlegend:false, shapes:[{type:'line', xref:'paper', x0:0, x1:1, y0:0, y1:0, line:{dash:'dot'}}] }
+      },
+      rsi: {
+        data: [{ type:'scatter', mode:'lines', x, y:r, name:'RSI(14)'}],
+        layout: { height: 160, margin:{l:40,r:10,t:10,b:20}, showlegend:false,
+          yaxis:{range:[0,100]}, shapes:[
+            {type:'line', xref:'paper',x0:0,x1:1,y0:30,y1:30,line:{dash:'dot'}},
+            {type:'line', xref:'paper',x0:0,x1:1,y0:70,y1:70,line:{dash:'dot'}}
+          ] }
+      },
+      stoch: {
+        data: [
+          { type:'scatter', mode:'lines', x, y: st.k, name:'%K' },
+          { type:'scatter', mode:'lines', x, y: st.d, name:'%D' },
+        ],
+        layout: { height: 160, margin:{l:40,r:10,t:10,b:20}, showlegend:false,
+          yaxis:{range:[0,100]}, shapes:[
+            {type:'line', xref:'paper',x0:0,x1:1,y0:20,y1:20,line:{dash:'dot'}},
+            {type:'line', xref:'paper',x0:0,x1:1,y0:80,y1:80,line:{dash:'dot'}}
+          ] }
+      },
+      stochrsi: {
+        data: [
+          { type:'scatter', mode:'lines', x, y: sr.k, name:'StochRSI %K' },
+          { type:'scatter', mode:'lines', x, y: sr.d, name:'StochRSI %D' },
+        ],
+        layout: { height: 160, margin:{l:40,r:10,t:10,b:20}, showlegend:false,
+          yaxis:{range:[0,100]}, shapes:[
+            {type:'line', xref:'paper',x0:0,x1:1,y0:20,y1:20,line:{dash:'dot'}},
+            {type:'line', xref:'paper',x0:0,x1:1,y0:80,y1:80,line:{dash:'dot'}}
+          ] }
+      },
+      trend: {
+        data: [
+          { type:'scatter', mode:'lines', x, y: close, name:'Close', line:{width:1.4} },
+          ...ext.lows.map(i => ({type:'scatter', mode:'markers', x:[x[i]], y:[close[i]], marker:{symbol:'triangle-down', size:12}, showlegend:false})),
+          ...ext.highs.map(i => ({type:'scatter', mode:'markers', x:[x[i]], y:[close[i]], marker:{symbol:'triangle-up', size:12}, showlegend:false})),
+        ],
+        layout: { height: 220, margin:{l:40,r:10,t:10,b:25}, showlegend:false,
+          shapes: clusters.map(c => ({type:'line', xref:'paper', x0:0, x1:1, y0:c.center, y1:c.center, opacity:0.6}))
+        }
+      }
+    };
+  }, [data]);
+
+  const metaLine = data ? `Quelle: ${data.meta.source ?? '—'}  ·  Period verwendet: ${data.meta.used_period ?? period}  ·  Interval verwendet: ${data.meta.used_interval ?? interval}` : 'Quelle: —  ·  Period verwendet: —  ·  Interval verwendet: —';
+
   return (
-    <div style={{padding:'16px', color:'#eee', fontFamily:'system-ui, -apple-system, Segoe UI, Roboto, Arial'}}>
-      <h1 style={{margin:'0 0 12px'}}>Trading Dashboard</h1>
-      <div style={{display:'flex', gap:8, alignItems:'center', marginBottom:10}}>
-        <input value={ticker} onChange={e=>setTicker(e.target.value)} style={{width:120}}/>
-        <select value={period} onChange={e=>setPeriod(e.target.value)}>
-          {['1mo','3mo','6mo','1y','2y','5y','10y'].map(p=><option key={p} value={p}>{p}</option>)}
+    <div style={{padding:'16px 18px', color:'#ddd', fontFamily:'system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial'}}>
+      <h1 style={{margin:'4px 0 14px'}}>Trading Dashboard</h1>
+      <div style={{display:'flex', gap:8, alignItems:'center', flexWrap:'wrap'}}>
+        <input value={ticker} onChange={e=>setTicker(e.target.value)} style={{width:120, padding:'6px 8px', borderRadius:6, border:'1px solid #444', background:'#111', color:'#eee'}}/>
+        <select value={period} onChange={e=>setPeriod(e.target.value)} style={{padding:'6px 8px', borderRadius:6, background:'#111', color:'#eee', border:'1px solid #444'}}>
+          {['1y','2y','3y','5y'].map(p=><option key={p} value={p}>{p}</option>)}
         </select>
-        <select value={interval} onChange={e=>setInterval(e.target.value)}>
-          {['1d','1h','1wk','1mo'].map(p=><option key={p} value={p}>{p}</option>)}
+        <select value={interval} onChange={e=>setInterval(e.target.value)} style={{padding:'6px 8px', borderRadius:6, background:'#111', color:'#eee', border:'1px solid #444'}}>
+          {['1d','1h','1wk'].map(p=><option key={p} value={p}>{p}</option>)}
         </select>
-        <button onClick={load} disabled={loading}>{loading?'Lädt…':'Laden'}</button>
+        <button onClick={load} disabled={loading} style={{padding:'6px 12px', borderRadius:6, background:'#2a66f0', color:'#fff', border:'none', cursor:'pointer'}}>{loading?'Lädt…':'Laden'}</button>
       </div>
 
-      <div style={{marginBottom:8, color:'#bbb', fontSize:12}}>
-        Quelle: — • Period verwendet: <b>{payload?.used_period || '—'}</b> • Interval verwendet: <b>{payload?.used_interval || '—'}</b>
-      </div>
-      {err && <div style={{color:'#ff6', margin:'8px 0'}}>Fehler: {err}</div>}
-      {fig && <Plot data={fig.data} layout={fig.layout} config={{displayModeBar:true, responsive:true}} />}
+      <div style={{marginTop:8, fontSize:12, color:'#9aa'}}>{metaLine}</div>
+      {err && <div style={{marginTop:6, color:'#ff6'}}>Fehler: {err}</div>}
 
-      <details style={{marginTop:12}}>
+      {figs && (
+        <>
+          <Plot data={figs.price.data} layout={figs.price.layout} config={{responsive:true}} />
+          <Plot data={figs.macd.data} layout={figs.macd.layout} config={{responsive:true}} />
+          <Plot data={figs.rsi.data} layout={figs.rsi.layout} config={{responsive:true}} />
+          <Plot data={figs.stoch.data} layout={figs.stoch.layout} config={{responsive:true}} />
+          <Plot data={figs.stochrsi.data} layout={figs.stochrsi.layout} config={{responsive:true}} />
+          <Plot data={figs.trend.data} layout={figs.trend.layout} config={{responsive:true}} />
+        </>
+      )}
+
+      <details style={{marginTop:10}}>
         <summary style={{cursor:'pointer'}}>Debug: Rohdaten anzeigen</summary>
-        <pre style={{marginTop:8, background:'#111', padding:'12px', overflow:'auto'}}>
+        <pre style={{whiteSpace:'pre-wrap', background:'#111', padding:12, borderRadius:8, border:'1px solid #333', color:'#9f9'}}>
 {JSON.stringify(payload, null, 2)}
         </pre>
       </details>
