@@ -1,5 +1,3 @@
-import TradingDashboard from './components/TradingDashboard.jsx';
-
-export default function App() {
-  return <TradingDashboard />;
-}
+import React from 'react';
+import ToolDashboard from './components/ToolDashboard.jsx';
+export default function App(){ return <ToolDashboard/>; }
